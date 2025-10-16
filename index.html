@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sales Summary</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+  <style>
+    body { padding-top: 2rem; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    #captcha-image img { max-width: 100%; height: auto; }
+    .spinner { width: 1.5rem; height: 1.5rem; border: .25rem solid #dee2e6; border-top-color: #0d6efd; border-radius: 50%; animation: spin 1s linear infinite; display: inline-block; vertical-align: middle; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="mb-4">
+      <h1 class="h3" id="page-title">Sales Summary</h1>
+      <p class="text-muted mb-0">This page summarizes sales from data.csv and can also solve a simple captcha image passed via the url parameter.</p>
+    </header>
+
+    <section class="mb-5">
+      <div class="card">
+        <div class="card-header">Total Sales</div>
+        <div class="card-body">
+          <p class="mb-1">Computed from data.csv (sales column):</p>
+          <div class="display-6 fw-semibold" id="total-sales">Loading…</div>
+          <div class="small text-muted" id="sales-status"></div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="card">
+        <div class="card-header">Captcha Solver</div>
+        <div class="card-body">
+          <p class="mb-2">
+            Pass a captcha image URL using the ?url=... query parameter. Example:
+            <span class="mono">?url=https%3A%2F%2Fexample.com%2Fcaptcha.png</span>
+          </p>
+          <div class="mb-2">
+            <strong>Captcha URL:</strong>
+            <span id="captcha-url" class="mono text-break">None provided</span>
+          </div>
+          <div id="captcha-image" class="mb-3"></div>
+          <div>
+            <strong>Solved Text:</strong>
+            <span id="captcha-text" class="mono">Awaiting input…</span>
+            <span id="captcha-progress" class="ms-2" aria-hidden="true" style="display:none;"><span class="spinner"></span> Solving…</span>
+          </div>
+          <div class="small text-muted mt-2" id="captcha-status"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Dependencies -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <script>
+    (function() {
+      const qs = new URLSearchParams(location.search);
+      const seed = qs.get('seed') || '';
+      document.title = `Sales Summary ${seed}`;
+      document.getElementById('page-title').textContent = `Sales Summary ${seed}`;
+
+      // Load and sum sales from data.csv
+      const totalEl = document.getElementById('total-sales');
+      const salesStatusEl = document.getElementById('sales-status');
+
+      async function loadAndSumCSV() {
+        try {
+          const res = await fetch('data.csv', { cache: 'no-store' });
+          if (!res.ok) throw new Error(`Failed to fetch data.csv (${res.status})`);
+          const csvText = await res.text();
+          const parsed = Papa.parse(csvText, { header: true, skipEmptyLines: true });
+          if (parsed.errors && parsed.errors.length) {
+            console.warn('CSV parse warnings/errors:', parsed.errors);
+          }
+          const rows = parsed.data || [];
+          let total = 0;
+          for (const row of rows) {
+            let v = row.sales ?? row.Sales ?? row.SALES;
+            if (v == null) continue;
+            if (typeof v !== 'string') v = String(v);
+            v = v.trim();
+            if (!v) continue;
+            // Normalize numeric (remove currency symbols and thousand separators)
+            const normalized = v.replace(/[^0-9eE+.\-]/g, '');
+            const num = Number(normalized);
+            if (!Number.isNaN(num)) total += num;
+          }
+          // Display with up to 2 decimals if needed
+          const formatted = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(total);
+          totalEl.textContent = formatted;
+          salesStatusEl.textContent = `Rows processed: ${rows.length}`;
+        } catch (err) {
+          console.error(err);
+          totalEl.textContent = 'Error';
+          salesStatusEl.textContent = String(err.message || err);
+        }
+      }
+
+      loadAndSumCSV();
+
+      // Captcha solver
+      const urlParam = qs.get('url');
+      const captchaUrlEl = document.getElementById('captcha-url');
+      const captchaImgContainer = document.getElementById('captcha-image');
+      const captchaTextEl = document.getElementById('captcha-text');
+      const captchaStatusEl = document.getElementById('captcha-status');
+      const captchaProgressEl = document.getElementById('captcha-progress');
+
+      function setProgress(on) {
+        captchaProgressEl.style.display = on ? '' : 'none';
+      }
+
+      async function showCaptchaURL(url) {
+        captchaUrlEl.textContent = url;
+        const a = document.createElement('a');
+        a.href = url;
+        a.textContent = ' (open)';
+        a.target = '_blank';
+        a.rel = 'noopener';
+        captchaUrlEl.appendChild(a);
+      }
+
+      async function solveCaptchaFromUrl(url) {
+        setProgress(true);
+        captchaStatusEl.textContent = '';
+        captchaTextEl.textContent = 'Solving…';
+
+        const timeoutMs = 15000;
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout after 15s')), timeoutMs));
+
+        try {
+          // Try fetching the resource
+          const res = await Promise.race([fetch(url, { cache: 'no-store' }), timeoutPromise]);
+          if (!res.ok) throw new Error(`Failed to fetch captcha (${res.status})`);
+          const ct = (res.headers.get('content-type') || '').toLowerCase();
+
+          // If text or JSON, just display it as the solved text
+          if (ct.startsWith('text/')) {
+            const text = await Promise.race([res.text(), timeoutPromise]);
+            captchaTextEl.textContent = text.trim();
+            setProgress(false);
+            captchaStatusEl.textContent = 'Solved from text response.';
+            return;
+          }
+          if (ct.includes('application/json')) {
+            const json = await Promise.race([res.json(), timeoutPromise]);
+            const text = (json && (json.text || json.solution || json.captcha || JSON.stringify(json))) || '';
+            captchaTextEl.textContent = String(text).trim();
+            setProgress(false);
+            captchaStatusEl.textContent = 'Solved from JSON response.';
+            return;
+          }
+
+          // Assume image/blob
+          const blob = await Promise.race([res.blob(), timeoutPromise]);
+          // Display the image (via object URL to avoid CORS taint issues)
+          const objUrl = URL.createObjectURL(blob);
+          captchaImgContainer.innerHTML = '';
+          const img = document.createElement('img');
+          img.alt = 'Captcha image';
+          img.src = objUrl;
+          img.className = 'img-fluid border rounded';
+          captchaImgContainer.appendChild(img);
+
+          // OCR with Tesseract
+          // Hints: keep only 'eng', defaults should fetch traineddata from CDN
+          const result = await Promise.race([
+            Tesseract.recognize(blob, 'eng'),
+            timeoutPromise
+          ]);
+          const text = (result && result.data && result.data.text) ? result.data.text.trim() : '';
+          captchaTextEl.textContent = text || '(no text detected)';
+          captchaStatusEl.textContent = 'Solved via OCR.';
+        } catch (err) {
+          console.error(err);
+          captchaTextEl.textContent = 'Failed to solve';
+          captchaStatusEl.textContent = String(err.message || err);
+        } finally {
+          setProgress(false);
+        }
+      }
+
+      if (urlParam) {
+        showCaptchaURL(urlParam);
+        solveCaptchaFromUrl(urlParam);
+      } else {
+        captchaStatusEl.textContent = 'Provide a captcha image URL via ?url=... to attempt OCR.';
+      }
+    })();
+  </script>
+</body>
+</html>
